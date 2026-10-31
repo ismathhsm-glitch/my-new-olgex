@@ -1,0 +1,69 @@
+spring:
+  application:
+    name: invoice-security
+  profiles:
+    active: ${SPRING_PROFILES_ACTIVE:dev}
+  datasource:
+    url: ${DB_URL:jdbc:mysql://localhost:3306/olgax_invoice?serverTimezone=UTC}
+    username: ${DB_USERNAME:olgax}
+    password: ${DB_PASSWORD:}
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
+    show-sql: false
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    placeholders:
+      demo_password_hash: ${DEMO_BCRYPT_PASSWORD_HASH:__PASSWORD_HASH_NOT_CONFIGURED__}
+  mail:
+    host: ${SMTP_HOST:localhost}
+    port: ${SMTP_PORT:1025}
+    username: ${SMTP_USERNAME:}
+    password: ${SMTP_PASSWORD:}
+    properties:
+      mail.smtp.auth: ${SMTP_AUTH:false}
+      mail.smtp.starttls.enable: ${SMTP_STARTTLS:false}
+
+server:
+  port: ${SERVER_PORT:8080}
+
+app:
+  cors:
+    allowed-origin: ${CORS_ALLOWED_ORIGIN:http://localhost:5173}
+  jwt:
+    secret: ${JWT_SECRET:}
+    access-ttl: PT15M
+    refresh-ttl: P7D
+  security:
+    face:
+      samples-required: 3
+      similarity-threshold: 0.92
+      nonce-ttl: PT2M
+    risk:
+      medium-threshold: 30
+      high-threshold: 60
+      lock-threshold: 85
+      max-failures: 10
+      lock-duration: PT15M
+    step-up:
+      ttl: PT5M
+      high-value-invoice-threshold: 10000
+    email-otp:
+      hmac-secret: ${OTP_HMAC_SECRET:}
+      ttl: PT10M
+      cooldown: PT60S
+      max-per-hour: 5
+
+springdoc:
+  swagger-ui:
+    path: /swagger-ui.html
+
+---
+spring:
+  config:
+    activate:
+      on-profile: prod
+  jpa:
+    show-sql: false
