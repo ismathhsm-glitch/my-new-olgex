@@ -22,6 +22,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
+import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HexFormat;
 import java.util.List;
@@ -60,6 +61,7 @@ public class AuthService {
     private final int mediumRiskThreshold;
     private final int lockRiskThreshold;
     private final int maxFailures;
+    private final int faceRequiredAfterFailures;
     private final ConcurrentHashMap<String, EmailRateWindow> emailRateWindows = new ConcurrentHashMap<>();
 
     public AuthService(
@@ -90,6 +92,45 @@ public class AuthService {
             @Value("${app.security.email-otp.ttl:PT10M}") Duration emailOtpTtl,
             @Value("${app.security.email-otp.cooldown:PT60S}") Duration emailOtpCooldown,
             @Value("${app.security.email-otp.max-per-hour:5}") int emailOtpMaxSendsPerHour) {
+        this(userRepository, organizationRepository, organizationMemberRepository, loginAttemptRepository,
+                loginChallengeRepository, trustedDeviceRepository, refreshTokenRepository,
+                passwordResetTokenRepository, emailVerificationTokenRepository, faceVerificationService,
+                riskScoringService, passwordEncoder, jwtService, emailNotificationService,
+                geoLocationService, auditLoggingService, objectMapper, refreshTtl, challengeTtl,
+                lockDuration, mediumRiskThreshold, lockRiskThreshold, maxFailures, otpHmacSecret,
+                emailOtpTtl, emailOtpCooldown, emailOtpMaxSendsPerHour, 5);
+    }
+
+    @org.springframework.beans.factory.annotation.Autowired
+    public AuthService(
+            UserRepository userRepository,
+            OrganizationRepository organizationRepository,
+            OrganizationMemberRepository organizationMemberRepository,
+            LoginAttemptRepository loginAttemptRepository,
+            LoginChallengeRepository loginChallengeRepository,
+            TrustedDeviceRepository trustedDeviceRepository,
+            RefreshTokenRepository refreshTokenRepository,
+            PasswordResetTokenRepository passwordResetTokenRepository,
+            EmailVerificationTokenRepository emailVerificationTokenRepository,
+            FaceVerificationService faceVerificationService,
+            RiskScoringService riskScoringService,
+            PasswordEncoder passwordEncoder,
+            JwtService jwtService,
+            EmailNotificationService emailNotificationService,
+            GeoLocationService geoLocationService,
+            AuditLoggingService auditLoggingService,
+            ObjectMapper objectMapper,
+            @Value("${app.jwt.refresh-ttl:P7D}") Duration refreshTtl,
+            @Value("${app.security.face.nonce-ttl:PT2M}") Duration challengeTtl,
+            @Value("${app.security.risk.lock-duration:PT15M}") Duration lockDuration,
+            @Value("${app.security.risk.medium-threshold:30}") int mediumRiskThreshold,
+            @Value("${app.security.risk.lock-threshold:85}") int lockRiskThreshold,
+            @Value("${app.security.risk.max-failures:10}") int maxFailures,
+            @Value("${app.security.email-otp.hmac-secret:}") String otpHmacSecret,
+            @Value("${app.security.email-otp.ttl:PT10M}") Duration emailOtpTtl,
+            @Value("${app.security.email-otp.cooldown:PT60S}") Duration emailOtpCooldown,
+            @Value("${app.security.email-otp.max-per-hour:5}") int emailOtpMaxSendsPerHour,
+            @Value("${app.security.login.face-required-after-failures:5}") int faceRequiredAfterFailures) {
         this.userRepository = userRepository;
         this.organizationRepository = organizationRepository;
         this.organizationMemberRepository = organizationMemberRepository;
@@ -117,6 +158,7 @@ public class AuthService {
         this.mediumRiskThreshold = mediumRiskThreshold;
         this.lockRiskThreshold = lockRiskThreshold;
         this.maxFailures = maxFailures;
+        this.faceRequiredAfterFailures = faceRequiredAfterFailures;
     }
 
     @Transactional
@@ -266,6 +308,40 @@ public class AuthService {
         }
         if (user.getStatus() == User.AccountStatus.DISABLED || !Boolean.TRUE.equals(user.getIsActive())) {
             throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Account is disabled");
+        }
+        boolean hasFace = user.isFaceEnrolled() || faceVerificationService.isEnrolled(user.getId());
+        if (hasFace && user.getFailedAttempts() >= faceRequiredAfterFailures) {
+            List<String> reasons = new ArrayList<>(List.of("REPEATED_FAILED_ATTEMPTS"));
+            RiskScoringService.RiskScore risk = new RiskScoringService.RiskScore(90, reasons);
+            ChallengeIssue issued = createChallenge(user, request.deviceHash(), ipAddress, risk);
+            recordAttempt(user.getEmail(), user.getId(), ipAddress, true, "FACE_VERIFICATION_REQUIRED",
+                    risk.score(), risk.reasons(), request.deviceHash());
+            auditLoggingService.record(user.getId(), organizationId(user), "LOGIN_CHALLENGE_CREATED",
+                    "users", user.getId().toString(), risk.score(), VerificationResult.NOT_REQUIRED,
+                    writeJson(risk.reasons()));
+            return AuthDtos.AuthResult.faceChallenge(issued.challenge().getId(), issued.nonce(),
+                    risk.score(), risk.reasons());
+        }
+        if (!hasFace) {
+            RiskScoringService.RiskScore risk = riskScoringService.score(
+                    user, request.deviceHash(), ipAddress, userAgent);
+            if (risk.score() >= lockRiskThreshold) {
+                recordAttempt(user.getEmail(), user.getId(), ipAddress, false,
+                        "HIGH_RISK_LOGIN", risk.score(), risk.reasons(), request.deviceHash());
+                lockAccount(user, ipAddress, "HIGH_RISK_LOGIN");
+                throw new ResponseStatusException(HttpStatus.LOCKED, "Account is temporarily locked");
+            }
+            List<String> reasons = new ArrayList<>(risk.reasons());
+            reasons.add("NO_FACE_ENROLLMENT");
+            recordAttempt(user.getEmail(), user.getId(), ipAddress, true, "SUCCESS",
+                    Math.min(30, risk.score()), reasons, request.deviceHash());
+            user.setFailedAttempts(0);
+            user.setLockedUntil(null);
+            userRepository.save(user);
+            rememberDevice(user, request.deviceHash(), ipAddress, userAgent, false);
+            audit(user.getId(), organizationId(user), "LOGIN_SUCCEEDED", "users", user.getId().toString(), Math.min(30, risk.score()));
+            AuthDtos.AuthResult tokens = issueTokens(user);
+            return AuthDtos.AuthResult.noFace(tokens.accessToken(), tokens.refreshToken(), tokens.expiresInSeconds());
         }
 
         RiskScoringService.RiskScore risk = riskScoringService.score(
@@ -419,14 +495,27 @@ public class AuthService {
     }
 
     private void failLogin(User user, String ipAddress) {
-        user.setFailedAttempts(user.getFailedAttempts() + 1);
+        int nextFailures = user.getFailedAttempts() + 1;
+        boolean hasFace = user.isFaceEnrolled() || faceVerificationService.isEnrolled(user.getId());
+        user.setFailedAttempts(nextFailures);
         recordAttempt(user.getEmail(), user.getId(), ipAddress, false, "INVALID_CREDENTIALS");
         audit(user.getId(), organizationId(user), "LOGIN_FAILED", "users", user.getId().toString(), null);
-        if (user.getFailedAttempts() >= maxFailures) {
+        if (nextFailures >= maxFailures) {
             lockAccount(user, ipAddress, "TOO_MANY_FAILED_ATTEMPTS");
-        } else {
-            userRepository.save(user);
+            return;
         }
+        if (nextFailures == faceRequiredAfterFailures) {
+            if (hasFace) {
+                auditLoggingService.record(user.getId(), organizationId(user), "FAILED_ATTEMPTS_THRESHOLD_REACHED",
+                        "users", user.getId().toString(), nextFailures, VerificationResult.NOT_REQUIRED, null);
+                emailNotificationService.sendSecurityAlert(user.getEmail(),
+                        "Face verification required on your next sign-in",
+                        "This account reached " + nextFailures + " consecutive failed sign-ins. Face verification will be required before the next successful sign-in.");
+            } else {
+                lockAccount(user, ipAddress, "TOO_MANY_FAILED_ATTEMPTS");
+            }
+        }
+        userRepository.save(user);
     }
 
     private void lockAccount(User user, String ipAddress, String reason) {

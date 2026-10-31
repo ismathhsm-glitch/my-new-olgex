@@ -28,6 +28,7 @@ spring:
 
 server:
   port: ${SERVER_PORT:8080}
+  forward-headers-strategy: framework
 
 app:
   cors:
@@ -37,6 +38,9 @@ app:
     access-ttl: PT15M
     refresh-ttl: P7D
   security:
+    login:
+      face-required-after-failures: 5
+      allow-login-without-face: true
     face:
       samples-required: 3
       similarity-threshold: 0.92

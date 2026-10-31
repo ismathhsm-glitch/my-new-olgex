@@ -11,6 +11,7 @@ import java.time.LocalDateTime;
 public interface LoginAttemptRepository extends JpaRepository<LoginAttempt, Long> {
     List<LoginAttempt> findByEmail(String email);
     boolean existsByEmail(String email);
+    LoginAttempt findTopByUserIdAndIsSuccessfulTrueOrderByAttemptedAtDesc(Long userId);
     List<LoginAttempt> findTop50ByEmailAndIsSuccessfulTrueOrderByAttemptedAtDesc(String email);
     long countByEmailAndAttemptedAtAfterAndIsSuccessfulFalse(String email, LocalDateTime since);
     boolean existsByEmailAndIpAddressAndIsSuccessfulTrueAndAttemptedAtAfter(

@@ -56,13 +56,22 @@ public final class AuthDtos {
             String challengeId,
             String challengeNonce,
             Integer riskScore,
-            List<String> riskReasons) {
+            List<String> riskReasons,
+            Boolean faceEnrolled,
+            Boolean recommendEnrollment) {
         public static AuthResult tokens(String access, String refresh, long ttl) {
-            return new AuthResult("SUCCESS", access, refresh, "Bearer", ttl, null, null, null, List.of());
+            return new AuthResult("SUCCESS", access, refresh, "Bearer", ttl,
+                    null, null, null, List.of(), true, false);
+        }
+
+        public static AuthResult noFace(String access, String refresh, long ttl) {
+            return new AuthResult("SUCCESS", access, refresh, "Bearer", ttl,
+                    null, null, null, List.of(), false, true);
         }
 
         public static AuthResult faceChallenge(String id, String nonce, int score, List<String> reasons) {
-            return new AuthResult("FACE_VERIFICATION_REQUIRED", null, null, null, null, id, nonce, score, reasons);
+            return new AuthResult("FACE_VERIFICATION_REQUIRED", null, null, null, null,
+                    id, nonce, score, reasons, null, null);
         }
     }
 

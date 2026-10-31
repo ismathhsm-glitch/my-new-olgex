@@ -43,3 +43,6 @@ forgot.json
 register*.json
 verify*.json
 resend.json
+olgax_backup.sql
+.gradle/
+.idea/
